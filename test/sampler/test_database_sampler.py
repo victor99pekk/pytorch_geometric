@@ -173,3 +173,162 @@ def test_empty_result_heterogeneous():
     seeds = torch.tensor([1], dtype=torch.long)
     node, row, col = DatabaseSampler._empty_result(seeds, is_hetero=True)
     assert node == row == col == {}
+
+
+def test_build_node_query_params_default_returns_none():
+    """Base DatabaseSampler._build_node_query_params returns None."""
+    class DefaultSampler(DatabaseSampler):
+        def _build_node_sampling_query(self):
+            return "QUERY"
+        def _build_edge_sampling_query(self):
+            return None
+
+    gs = FakeDatabaseGraphStore()
+    sampler = DefaultSampler(gs)
+    # Default implementation returns None
+    result = sampler._build_node_query_params(torch.tensor([1]))
+    assert result is None
+
+
+def test_build_edge_query_params_default_returns_none():
+    """Base DatabaseSampler._build_edge_query_params returns None."""
+    class DefaultSampler(DatabaseSampler):
+        def _build_node_sampling_query(self):
+            return None
+        def _build_edge_sampling_query(self):
+            return "QUERY"
+
+    gs = FakeDatabaseGraphStore()
+    sampler = DefaultSampler(gs)
+    # Default implementation returns None
+    result = sampler._build_edge_query_params(torch.tensor([1]))
+    assert result is None
+
+
+def test_sample_from_nodes_raises_on_none_params():
+    """When _build_node_query_params returns None, raise ValueError."""
+    class NoneParamsSampler(DatabaseSampler):
+        def _build_node_sampling_query(self):
+            return "QUERY"
+        def _build_node_query_params(self, seeds, **kwargs):
+            return None  # Return None (not empty dict)
+
+    gs = FakeDatabaseGraphStore()
+    sampler = NoneParamsSampler(gs)
+    with pytest.raises(ValueError, match="Query parameters are empty"):
+        sampler.sample_from_nodes(_node_input([0]))
+
+
+def test_sample_from_edges_raises_on_none_params():
+    """When _build_edge_query_params returns None, raise ValueError."""
+    class NoneParamsSampler(DatabaseSampler):
+        def _build_edge_sampling_query(self):
+            return "QUERY"
+        def _build_edge_query_params(self, seeds, **kwargs):
+            return None  # Return None (not empty dict)
+
+    gs = FakeDatabaseGraphStore()
+    sampler = NoneParamsSampler(gs)
+    edge_input = EdgeSamplerInput(
+        input_id=None,
+        row=torch.tensor([0], dtype=torch.long),
+        col=torch.tensor([1], dtype=torch.long),
+    )
+    with pytest.raises(ValueError, match="Query parameters are empty"):
+        sampler.sample_from_edges(edge_input)
+
+
+def test_sample_from_nodes_with_none_decoded_result():
+    """When _decode_node_sampling_record returns None, use _empty_result."""
+    class NoneDecodingSampler(DatabaseSampler):
+        def _build_node_sampling_query(self):
+            return "QUERY"
+        def _build_node_query_params(self, seeds, **kwargs):
+            return {"seed_ids": seeds.tolist()}
+        def _decode_node_sampling_record(self, record, seeds):
+            return None  # Return None to trigger empty result
+
+    gs = FakeDatabaseGraphStore(records={"QUERY": {"data": "something"}})
+    sampler = NoneDecodingSampler(gs)
+    out = sampler.sample_from_nodes(_node_input([0]))
+    
+    assert isinstance(out, SamplerOutput)
+    assert out.row.numel() == 0
+    assert out.col.numel() == 0
+
+
+def test_sample_from_edges_with_none_decoded_result():
+    """When _decode_edge_sampling_record returns None, use _empty_result."""
+    class NoneDecodingSampler(DatabaseSampler):
+        def _build_edge_sampling_query(self):
+            return "QUERY"
+        def _build_edge_query_params(self, seeds, **kwargs):
+            return {"seed_ids": seeds.tolist()}
+        def _decode_edge_sampling_record(self, record, seeds):
+            return None  # Return None to trigger empty result
+
+    gs = FakeDatabaseGraphStore(records={"QUERY": {"data": "something"}})
+    sampler = NoneDecodingSampler(gs)
+    edge_input = EdgeSamplerInput(
+        input_id=None,
+        row=torch.tensor([0], dtype=torch.long),
+        col=torch.tensor([1], dtype=torch.long),
+    )
+    out = sampler.sample_from_edges(edge_input)
+    
+    assert isinstance(out, SamplerOutput)
+    assert out.row.numel() == 0
+    assert out.col.numel() == 0
+
+
+def test_sample_from_edges_hetero_with_decoded_result():
+    """Edge sampling in hetero mode with non-None decoded result."""
+    class CustomHeteroSampler(DatabaseSampler):
+        def _build_edge_sampling_query(self):
+            return "QUERY"
+        def _build_edge_query_params(self, seeds, **kwargs):
+            return {"seed_ids": seeds.tolist()}
+        def _decode_edge_sampling_record(self, record, seeds):
+            # Return hetero format: {edge_type: (nodes, edges)}
+            return (
+                {"paper": torch.tensor([0, 1], dtype=torch.long)},
+                {("paper", "cites", "paper"): torch.tensor([0, 1], dtype=torch.long)},
+                {("paper", "cites", "paper"): torch.tensor([1, 0], dtype=torch.long)},
+            )
+
+    gs = FakeDatabaseGraphStore(records={"QUERY": {"data": "something"}})
+    sampler = CustomHeteroSampler(gs, is_hetero=True)
+    edge_input = EdgeSamplerInput(
+        input_id=None,
+        row=torch.tensor([0], dtype=torch.long),
+        col=torch.tensor([1], dtype=torch.long),
+    )
+    out = sampler.sample_from_edges(edge_input)
+    
+    assert isinstance(out, HeteroSamplerOutput)
+    assert "paper" in out.node
+    assert ("paper", "cites", "paper") in out.row
+
+
+def test_sample_from_nodes_hetero_with_decoded_result():
+    """Node sampling in hetero mode with non-None decoded result."""
+    class CustomHeteroSampler(DatabaseSampler):
+        def _build_node_sampling_query(self):
+            return "QUERY"
+        def _build_node_query_params(self, seeds, **kwargs):
+            return {"seed_ids": seeds.tolist()}
+        def _decode_node_sampling_record(self, record, seeds):
+            # Return hetero format: (nodes, row, col)
+            return (
+                {"paper": torch.tensor([0, 1, 2], dtype=torch.long)},
+                {("paper", "cites", "paper"): torch.tensor([0, 1], dtype=torch.long)},
+                {("paper", "cites", "paper"): torch.tensor([1, 2], dtype=torch.long)},
+            )
+
+    gs = FakeDatabaseGraphStore(records={"QUERY": {"data": "something"}})
+    sampler = CustomHeteroSampler(gs, is_hetero=True)
+    out = sampler.sample_from_nodes(_node_input([0]))
+    
+    assert isinstance(out, HeteroSamplerOutput)
+    assert "paper" in out.node
+    assert ("paper", "cites", "paper") in out.row
